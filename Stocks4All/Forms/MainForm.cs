@@ -21,7 +21,6 @@ namespace Stocks4All
 {
   public partial class MainForm : BaseForm
   {
-    public Stock market, TVIX, nugt;
     int refreshTime = 2500;
     ThreadedBindingList<Stock> stocks;
     ThreadedBindingList<OrderSnapshot> AllPendingOrders;
@@ -194,254 +193,81 @@ namespace Stocks4All
           break;
 
         try
-        {
-          Stock[] quotes = new Stock[] {
-                                            new Stock() { Ticker = mainForm.market.Ticker},
-                                            new Stock() { Ticker = mainForm.TVIX.Ticker },
-                                            new Stock() { Ticker = mainForm.nugt.Ticker }};
+				{
+					Account account = Robinhood.rh.DownloadAllAccounts().Result.First();
+					IList<Position> positions = Robinhood.rh.DownloadPositions(account.PositionsUrl.Uri.ToString());
 
+					List<Stock> listedStocks = new List<Stock>();
+					foreach (Position position in positions)
+					{
+						Stock stock = mainForm.stocks.FirstOrDefault(s => s.InstrumentURL == position.InstrumentUrl.Uri.ToString());
+						
+						if (stock == null)
+						{
+							//if ((int)position.Quantity == 0)
+							//	continue; //skip stocks in RH watchlist
+							string positionUri = position.InstrumentUrl.Uri.ToString();
+							var q = Robinhood.rh.DownloadInstrument(positionUri);
+							stock = new Stock() { Ticker = q.Result.Symbol, NoOfShares = (int)position.Quantity, CostBasis = position.AverageBuyPrice, InstrumentURL = positionUri };
 
-          Account account = Robinhood.rh.DownloadAllAccounts().Result.First();
-          IList<Position> positions = Robinhood.rh.DownloadPositions(account.PositionsUrl.Uri.ToString());
+							mainForm.stocks.Add(stock);
+						}
+						else
+						{
 
-          foreach (Position position in positions)
-          {
-            Stock stock = mainForm.stocks.FirstOrDefault(s => s.InstrumentURL == position.InstrumentUrl.Uri.ToString());
+							stock.NoOfShares = (int)position.Quantity;
+							if (stock.NoOfShares > 0)
+								stock.CostBasis = position.AverageBuyPrice;
+							else
+								stock.CostBasis = 0.00m;
+						}
+					}
 
+					UpdateMarketQuotes(mainForm);
 
-            if (stock == null)
-            {
-              if ((int)position.Quantity == 0)
-                continue; //skip stocks in RH watchlist
-              var q = Robinhood.rh.DownloadInstrument(position.InstrumentUrl.Uri.ToString());
-              stock = new Stock() { Ticker = q.Result.Symbol, NoOfShares = (int)position.Quantity, CostBasis = position.AverageBuyPrice };
+					//Updating account information
+					mainForm.buyPowerLabel.Invoke((Action)delegate
+					{
+						mainForm.buyPowerLabel.Text = "Buying Power: $" + Math.Round(account.CashBalance.BuyingPower, 2).ToString();
+					});
 
-              mainForm.stocks.Add(stock);
-            }
-            else
-            {
+					mainForm.labelUnsettled.Invoke((Action)delegate
+					{
+						mainForm.labelUnsettled.Text = "Unsettled: $" + Math.Round(account.CashBalance.UnsettledFunds, 2).ToString();
+					});
 
-              stock.NoOfShares = (int)position.Quantity;
-              if (stock.NoOfShares > 0)
-                stock.CostBasis = position.AverageBuyPrice;
-              else
-                stock.CostBasis = 0.00m;
-            }
-          }
+					mainForm.labelCash.Invoke((Action)delegate
+					{
+						mainForm.labelCash.Text = "Cash: $" + Math.Round(account.CashBalance.BuyingPower + account.CashBalance.UnsettledFunds + account.CashBalance.CashHeldForOrders, 2).ToString();
+					});
 
+					mainForm.buttonAddStock.Invoke((Action)delegate
+					{
+						mainForm.buttonAddStock.Enabled = true;
+					});
 
-          if (mainForm.stocks.Count() > 0)
-            quotes = mainForm.stocks.Union(quotes).ToArray();
+					if (mainForm.PositionsGrid.Enabled == false)
+					{
+						mainForm.PositionsGrid.Invoke((Action)delegate
+						{
+							mainForm.buttonAddStock.Enabled = true;
+						});
+					}
 
-          List<Stock> marketStocks = Robinhood.GetQuote(quotes.ToList());
-          foreach (Stock stock in marketStocks)
-          {
-            if (stock.Ticker == market.Ticker)
-              mainForm.market = stock;
-            else if (stock.Ticker == TVIX.Ticker)
-              mainForm.TVIX = stock;
-            else if (stock.Ticker == nugt.Ticker)
-              mainForm.nugt = stock;
+					mainForm.PositionsGrid.Invoke((Action)delegate
+					{
+						UpdateGrids();
+					});
 
-            //relying on update recent order to add pending orders
-            ThreadedBindingList<OrderSnapshot> pendingOrders = null;
-            if (stock.PendingOrders != null)
-            {
-              lock (stock.PendingOrders)
-              {
-                pendingOrders = new ThreadedBindingList<OrderSnapshot>(AllPendingOrders.Where(o => o.InstrumentId == stock.InstrumentURL).ToList());
-              }
-            }
-            else
-              pendingOrders = new ThreadedBindingList<OrderSnapshot>(AllPendingOrders.Where(o => o.InstrumentId == stock.InstrumentURL).ToList());
-
-            if (pendingOrders.Count > 0)
-              stock.PendingOrders = pendingOrders;
-            else
-              stock.PendingOrders = null;
-
-            mainForm.PositionsGrid.BeginInvoke((Action)delegate
-            {
-              lock (mainForm.stocks)
-              {
-                int index = mainForm.stocks.ToList()
-                                        .FindIndex(s => s.Ticker == stock.Ticker);
-                if (index >= 0)
-                  mainForm.stocks[index] = stock;
-              }
-            });
-
-            if (stock.NoOfShares > 0)
-            {
-              if (!mainForm.tabControlMain.TabPages[1].Text.Contains("Loading")
-                              && !trailStopping.Contains(stock.Ticker))
-              {
-
-                //implementing trailing loss
-                if (stock.StopLoss != null
-                              && stock.StopLoss.Execution == PricePointControl.Execution.Trailing
-                              && stock.StopLoss.TrailPrcntg > 0 && stock.NoOfShares > 0)
-                {
-                  //PT reached sell
-                  if (stock.StopLoss.Price >= stock.LastTradePrice)
-                    stock.StopLoss.Price = 0; //reset stop loss
-                  decimal newVal = (stock.StopLoss.Price +
-                    (stock.StopLoss.Price * stock.StopLoss.TrailPrcntg / 100));
-
-                  if (stock.LastTradePrice >
-                    newVal
-                    ) // within 2% of price target place limit sell
-                  {
-                    newVal = Math.Round(stock.LastTradePrice - (stock.LastTradePrice * stock.StopLoss.TrailPrcntg / 100), 2);
-
-                    if (stock.PendingOrders == null || (stock.PendingOrders != null && !stock.PendingOrders.Any(o => o.StopPrice <= newVal + 0.2m && o.StopPrice >= newVal - 0.2m)))
-                    {
-                      if (stock.NoOfShares < stock.StopLoss.NoOfShares)
-                        stock.NoOfShares = stock.StopLoss.NoOfShares;
-                      stock.StopLoss.Trigger = TriggerType.Stop;
-                      KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, newVal);
-                      lock (trailStopping)
-                      {
-                        trailStopping.Add(stock.Ticker);
-                      }
-                      ThreadPool.QueueUserWorkItem(TrailStopper, input);
-                    }
-                  }
-                }
-
-                //no stop loss place it if manage trade selected
-                if (stock.ManageTrade && stock.NoOfShares > 0 && stock.StopLoss.Execution != PricePointControl.Execution.Trailing)
-                {
-                  decimal newVal;
-                  decimal? currentStop = null;
-
-                  if (stock.PendingOrders != null && stock.PendingOrders.Count() > 0)
-                  {
-                    currentStop = (decimal)stock.PendingOrders.First().Price;
-                  }
-
-                  //if price has moved > 2% from cost
-                  newVal = Math.Round(stock.CostBasis + (stock.CostBasis * 2.10m / 100), 2);
-                  if (stock.LastTradePrice > newVal)
-                  {
-                    //price has moved 2% from cost move stop to break even
-                    newVal = Math.Round(stock.CostBasis + (stock.CostBasis * 2.00m / 100), 2);
-                  }
-                  else
-                  {
-                    //place stop loss at max
-                    newVal = Math.Round(stock.CostBasis - (stock.CostBasis * stock.MaxPrctgLoss / 100), 2);
-                    stock.StopLoss.StopOffset = 0.02m;
-                    stock.StopLoss.Trigger = TriggerType.Stop;
-                    //price has already moved at or below stop loss liquidate immiediately
-                    if (stock.LastTradePrice <= newVal)
-                    {
-                      newVal = stock.LastTradePrice;
-                      stock.StopLoss.Trigger = TriggerType.Immediate;
-                    }
-                  }
-
-                  if (currentStop == null || currentStop <= newVal - 0.03m || currentStop >= newVal + 0.03m)
-                  {
-                    stock.StopLoss.NoOfShares = stock.NoOfShares;
-                    stock.StopLoss.Price = newVal;
-                    //place adjusted stop loss
-                    KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, newVal);
-                    lock (trailStopping)
-                    {
-                      trailStopping.Add(stock.Ticker);
-                    }
-                    ThreadPool.QueueUserWorkItem(TrailStopper, input);
-                  }
-                }
-              }
-
-              //Checking if Price target reached
-              if (stock.PriceTarget != null && stock.NoOfShares > 0
-                              && stock.PriceTarget.Price > 0
-                              && stock.PriceTarget.NoOfShares > 0
-                              && !priceTargeting.Contains(stock.Ticker))
-              {
-                //PT reached sell
-                if (stock.LastTradePrice + 0.02m >= stock.PriceTarget.Price) // within 2cent of price target place limit sell
-                {
-                  KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, stock.PriceTarget.Price);
-                  lock (priceTargeting)
-                  {
-                    priceTargeting.Add(stock.Ticker);
-                  }
-                  ThreadPool.QueueUserWorkItem(PriceTargeter, input);
-                }
-              }
-            }
-            else
-            {
-              //don't own this stock
-              stock.CostBasis = 0.00m;
-            }
-          }
-
-          //Updating market tickers
-          mainForm.BeginInvoke((MethodInvoker)(() =>
-          {
-            mainForm.marketLabel.Text = market.Quote;
-            mainForm.marketLabel.ForeColor = market.Color;
-          }));
-
-          mainForm.labelTVIX.BeginInvoke((Action)delegate
-          {
-            mainForm.labelTVIX.Text = TVIX.Quote;
-            mainForm.labelTVIX.ForeColor = TVIX.Color;
-          });
-          mainForm.nugtLabel.BeginInvoke((Action)delegate
-          {
-            mainForm.nugtLabel.Text = nugt.Quote;
-            mainForm.nugtLabel.ForeColor = nugt.Color;
-          });
-
-          //Updating account information
-          mainForm.buyPowerLabel.Invoke((Action)delegate
-          {
-            mainForm.buyPowerLabel.Text = "Buying Power: $" + Math.Round(account.CashBalance.BuyingPower, 2).ToString();
-          });
-
-          mainForm.labelUnsettled.Invoke((Action)delegate
-          {
-            mainForm.labelUnsettled.Text = "Unsettled: $" + Math.Round(account.CashBalance.UnsettledFunds, 2).ToString();
-          });
-
-          mainForm.labelCash.Invoke((Action)delegate
-          {
-            mainForm.labelCash.Text = "Cash: $" + Math.Round(account.CashBalance.BuyingPower + account.CashBalance.UnsettledFunds + account.CashBalance.CashHeldForOrders, 2).ToString();
-          });
-
-          mainForm.buttonAddStock.Invoke((Action)delegate
-          {
-            mainForm.buttonAddStock.Enabled = true;
-          });
-
-          if (mainForm.PositionsGrid.Enabled == false)
-          {
-            mainForm.PositionsGrid.Invoke((Action)delegate
-            {
-              mainForm.buttonAddStock.Enabled = true;
-            });
-          }
-
-          mainForm.PositionsGrid.Invoke((Action)delegate
-          {
-            UpdateGrids();
-          });
-
-          Thread.Sleep(refreshTime);
-        }
-        catch (AggregateException)
+					Thread.Sleep(refreshTime);
+				}
+				catch (AggregateException)
         {
           mainForm.BeginInvoke((MethodInvoker)(() =>
           {
-            mainForm.marketLabel.Text = "Could not reach Robinhood, Check network connection";
-            mainForm.marketLabel.ForeColor = Color.IndianRed;
-            mainForm.marketLabel.BringToFront();
+            mainForm.infoLabel.Text = "Could not reach Robinhood, Check network connection";
+            mainForm.infoLabel.ForeColor = Color.IndianRed;
+            mainForm.infoLabel.BringToFront();
           }));
         }
         catch (WebException e)
@@ -459,15 +285,168 @@ namespace Stocks4All
         }
       }
     }
-    #endregion
 
-    #region Placing orders
+		private void UpdateMarketQuotes(MainForm mainForm)
+		{
+			//List<Stock> quotes = new List<Stock>();
+			if (mainForm.stocks.Count() == 0)
+				return; //quotes = mainForm.stocks.Union(quotes).ToList();
 
-    /// <summary>
-    /// function to place trail stop order in a thread
-    /// </summary>
-    /// <param name="param"></param>
-    void TrailStopper(object param)
+			List<Stock> marketStocks = Robinhood.GetQuote(mainForm.stocks.ToList());
+			foreach (Stock stock in marketStocks)
+			{
+				//relying on update recent order to add pending orders
+				ThreadedBindingList<OrderSnapshot> pendingOrders = null;
+				if (stock.PendingOrders != null)
+				{
+					lock (stock.PendingOrders)
+					{
+						pendingOrders = new ThreadedBindingList<OrderSnapshot>(AllPendingOrders.Where(o => o.InstrumentId == stock.InstrumentURL).ToList());
+					}
+				}
+				else
+					pendingOrders = new ThreadedBindingList<OrderSnapshot>(AllPendingOrders.Where(o => o.InstrumentId == stock.InstrumentURL).ToList());
+
+				if (pendingOrders.Count > 0)
+					stock.PendingOrders = pendingOrders;
+				else
+					stock.PendingOrders = null;
+
+				mainForm.PositionsGrid.BeginInvoke((Action)delegate
+				{
+					lock (mainForm.stocks)
+					{
+						int index = mainForm.stocks.ToList()
+												.FindIndex(s => s.Ticker == stock.Ticker);
+						if (index >= 0)
+							mainForm.stocks[index] = stock;
+					}
+				});
+
+				if (stock.NoOfShares > 0)
+				{
+					UpdateOwnedStock(mainForm, stock);
+				}
+				else
+				{
+					//don't own this stock
+					stock.CostBasis = 0.00m;
+				}
+			}
+		}
+
+		private void UpdateOwnedStock(MainForm mainForm, Stock stock)
+		{
+			if (!mainForm.tabControlMain.TabPages[1].Text.Contains("Loading")
+												&& !trailStopping.Contains(stock.Ticker))
+			{
+
+				//implementing trailing loss
+				if (stock.StopLoss != null
+							  && stock.StopLoss.Execution == PricePointControl.Execution.Trailing
+							  && stock.StopLoss.TrailPrcntg > 0 && stock.NoOfShares > 0)
+				{
+					//PT reached sell
+					if (stock.StopLoss.Price >= stock.LastTradePrice)
+						stock.StopLoss.Price = 0; //reset stop loss
+					decimal newVal = (stock.StopLoss.Price +
+					  (stock.StopLoss.Price * stock.StopLoss.TrailPrcntg / 100));
+
+					if (stock.LastTradePrice >
+					  newVal
+					  ) // within 2% of price target place limit sell
+					{
+						newVal = Math.Round(stock.LastTradePrice - (stock.LastTradePrice * stock.StopLoss.TrailPrcntg / 100), 2);
+
+						if (stock.PendingOrders == null || (stock.PendingOrders != null && !stock.PendingOrders.Any(o => o.StopPrice <= newVal + 0.2m && o.StopPrice >= newVal - 0.2m)))
+						{
+							if (stock.NoOfShares < stock.StopLoss.NoOfShares)
+								stock.NoOfShares = stock.StopLoss.NoOfShares;
+							stock.StopLoss.Trigger = TriggerType.Stop;
+							KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, newVal);
+							lock (trailStopping)
+							{
+								trailStopping.Add(stock.Ticker);
+							}
+							ThreadPool.QueueUserWorkItem(TrailStopper, input);
+						}
+					}
+				}
+
+				//no stop loss place it if manage trade selected
+				if (stock.ManageTrade && stock.NoOfShares > 0 && stock.StopLoss.Execution != PricePointControl.Execution.Trailing)
+				{
+					decimal newVal;
+					decimal? currentStop = null;
+
+					if (stock.PendingOrders != null && stock.PendingOrders.Count() > 0)
+					{
+						currentStop = (decimal)stock.PendingOrders.First().Price;
+					}
+
+					//if price has moved > 2% from cost
+					newVal = Math.Round(stock.CostBasis + (stock.CostBasis * 2.10m / 100), 2);
+					if (stock.LastTradePrice > newVal)
+					{
+						//price has moved 2% from cost move stop to break even
+						newVal = Math.Round(stock.CostBasis + (stock.CostBasis * 2.00m / 100), 2);
+					}
+					else
+					{
+						//place stop loss at max
+						newVal = Math.Round(stock.CostBasis - (stock.CostBasis * stock.MaxPrctgLoss / 100), 2);
+						stock.StopLoss.StopOffset = 0.02m;
+						stock.StopLoss.Trigger = TriggerType.Stop;
+						//price has already moved at or below stop loss liquidate immiediately
+						if (stock.LastTradePrice <= newVal)
+						{
+							newVal = stock.LastTradePrice;
+							stock.StopLoss.Trigger = TriggerType.Immediate;
+						}
+					}
+
+					if (currentStop == null || currentStop <= newVal - 0.03m || currentStop >= newVal + 0.03m)
+					{
+						stock.StopLoss.NoOfShares = stock.NoOfShares;
+						stock.StopLoss.Price = newVal;
+						//place adjusted stop loss
+						KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, newVal);
+						lock (trailStopping)
+						{
+							trailStopping.Add(stock.Ticker);
+						}
+						ThreadPool.QueueUserWorkItem(TrailStopper, input);
+					}
+				}
+			}
+
+			//Checking if Price target reached
+			if (stock.PriceTarget != null && stock.NoOfShares > 0
+							&& stock.PriceTarget.Price > 0
+							&& stock.PriceTarget.NoOfShares > 0
+							&& !priceTargeting.Contains(stock.Ticker))
+			{
+				//PT reached sell
+				if (stock.LastTradePrice + 0.02m >= stock.PriceTarget.Price) // within 2cent of price target place limit sell
+				{
+					KeyValuePair<Stock, decimal> input = new KeyValuePair<Stock, decimal>(stock, stock.PriceTarget.Price);
+					lock (priceTargeting)
+					{
+						priceTargeting.Add(stock.Ticker);
+					}
+					ThreadPool.QueueUserWorkItem(PriceTargeter, input);
+				}
+			}
+		}
+		#endregion
+
+		#region Placing orders
+
+		/// <summary>
+		/// function to place trail stop order in a thread
+		/// </summary>
+		/// <param name="param"></param>
+		void TrailStopper(object param)
     {
       KeyValuePair<Stock, decimal> input = (KeyValuePair<Stock, decimal>)param;
       Stock stock = input.Key;
@@ -568,47 +547,47 @@ namespace Stocks4All
     #endregion
 
     #region Read & Save stocks to file
-    public static void WriteToXmlFile<T>(string filePath, T objectToWrite, bool append = false) where T : new()
-    {
-      TextWriter writer = null;
-      try
-      {
-        if (System.IO.File.Exists(filePath))
-        {
-          System.IO.Directory.CreateDirectory(
-               System.IO.Path.GetDirectoryName(filePath));
-        }
+    //public static void WriteToXmlFile<T>(string filePath, T objectToWrite, bool append = false) where T : new()
+    //{
+    //  TextWriter writer = null;
+    //  try
+    //  {
+    //    if (System.IO.File.Exists(filePath))
+    //    {
+    //      System.IO.Directory.CreateDirectory(
+    //           System.IO.Path.GetDirectoryName(filePath));
+    //    }
 
-        var serializer = new XmlSerializer(typeof(T));
-        writer = new StreamWriter(filePath, append);
-        serializer.Serialize(writer, objectToWrite);
-      }
-      catch (Exception e)
-      {
-        Console.Write(e.ToString());
-      }
-      finally
-      {
-        if (writer != null)
-          writer.Close();
-      }
-    }
+    //    var serializer = new XmlSerializer(typeof(T));
+    //    writer = new StreamWriter(filePath, append);
+    //    serializer.Serialize(writer, objectToWrite);
+    //  }
+    //  catch (Exception e)
+    //  {
+    //    Console.Write(e.ToString());
+    //  }
+    //  finally
+    //  {
+    //    if (writer != null)
+    //      writer.Close();
+    //  }
+    //}
 
-    public static T ReadFromXmlFile<T>(string filePath) where T : new()
-    {
-      TextReader reader = null;
-      try
-      {
-        var serializer = new XmlSerializer(typeof(T));
-        reader = new StreamReader(filePath);
-        return (T)serializer.Deserialize(reader);
-      }
-      finally
-      {
-        if (reader != null)
-          reader.Close();
-      }
-    }
+    //public static T ReadFromXmlFile<T>(string filePath) where T : new()
+    //{
+    //  TextReader reader = null;
+    //  try
+    //  {
+    //    var serializer = new XmlSerializer(typeof(T));
+    //    reader = new StreamReader(filePath);
+    //    return (T)serializer.Deserialize(reader);
+    //  }
+    //  finally
+    //  {
+    //    if (reader != null)
+    //      reader.Close();
+    //  }
+    //}
 
     #endregion
 
@@ -626,8 +605,8 @@ namespace Stocks4All
     private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
     {
       formClosing = true;
-      if (stocks != null && stocks.Count() > 0)
-        WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
+      //if (stocks != null && stocks.Count() > 0)
+      //  WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
 
       Robinhood.SignOut();
     }
@@ -660,8 +639,8 @@ namespace Stocks4All
 
     private void saveToolStripMenuItem_Click(object sender, EventArgs e)
     {
-      if (stocks.Count() > 0)
-        WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
+      //if (stocks.Count() > 0)
+      //  WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
     }
 
     private void dataGridViewPositions_DataError(object sender, DataGridViewDataErrorEventArgs e)
@@ -824,8 +803,8 @@ namespace Stocks4All
 
       }
       UpdateGrids();
-      if (stocks.Count() > 0)
-        WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
+      //if (stocks.Count() > 0)
+      //  WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
     }
     void UpdateGrids()
     {
@@ -836,8 +815,8 @@ namespace Stocks4All
 
         //Getting sort order
         var propertyInfo = typeof(Stock).GetProperty(stocks.sortProperty);
-        List<Stock> sortedPositions = stocks.OrderBy(x => x.NoOfShares).ToList();
-        List<Stock> sortedWatch = stocks.OrderBy(x => x.NoOfShares).ToList();
+        List<Stock> sortedPositions = stocks.Where(s => s.NoOfShares > 0).OrderBy(x => x.NoOfShares).ToList();
+        List<Stock> sortedWatch = stocks.Where(s => s.NoOfShares == 0).OrderBy(x => x.NoOfShares).ToList();
 
         //Saving selected row index
         if (PositionsGrid.Rows.Count > 0 && PositionsGrid.SelectedRows != null && PositionsGrid.SelectedRows.Count > 0)
@@ -849,14 +828,14 @@ namespace Stocks4All
         if (stocks.sortDirection == ListSortDirection.Ascending)
         {
           scrollPosition = PositionsGrid.FirstDisplayedScrollingRowIndex;
-          PositionsGrid.DataSource = new ThreadedBindingList<Stock>(sortedPositions.Where(s => s.NoOfShares > 0)
+          PositionsGrid.DataSource = new ThreadedBindingList<Stock>(sortedPositions
                                                                     .OrderBy(x => propertyInfo.GetValue(x, null))
                                                                     .ToList());
           if (scrollPosition > 0)
             PositionsGrid.FirstDisplayedScrollingRowIndex = scrollPosition;
 
           scrollPosition = WatchListGrid.FirstDisplayedScrollingRowIndex;
-          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch.Where(s => s.NoOfShares == 0)
+          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch
                                                                     .OrderBy(x => propertyInfo.GetValue(x, null))
                                                                     .ToList());
           if (scrollPosition > 0)
@@ -866,17 +845,17 @@ namespace Stocks4All
         {
 
           scrollPosition = PositionsGrid.FirstDisplayedScrollingRowIndex;
-          PositionsGrid.DataSource = new ThreadedBindingList<Stock>(sortedPositions.Where(s => s.NoOfShares > 0)
+          PositionsGrid.DataSource = new ThreadedBindingList<Stock>(sortedPositions
                                                                     .OrderByDescending(x => propertyInfo.GetValue(x, null))
                                                                     .ToList());
           if (scrollPosition > 0)
             PositionsGrid.FirstDisplayedScrollingRowIndex = scrollPosition;
 
           scrollPosition = WatchListGrid.FirstDisplayedScrollingRowIndex;
-          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch.Where(s => s.NoOfShares == 0)
+          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch
                                                                     .OrderByDescending(x => propertyInfo.GetValue(x, null))
                                                                     .ToList());
-          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch.Where(s => s.NoOfShares == 0)
+          WatchListGrid.DataSource = new ThreadedBindingList<Stock>(sortedWatch
                                                                     .OrderBy(x => propertyInfo.GetValue(x, null))
                                                                     .ToList());
           if (scrollPosition > 0)
@@ -894,8 +873,8 @@ namespace Stocks4All
 
     private void saveStocksToolStripMenuItem_Click(object sender, EventArgs e)
     {
-      if (stocks.Count() > 0)
-        WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
+      //if (stocks.Count() > 0)
+      //  WriteToXmlFile<BindingList<Stock>>(Robinhood.__stocksFile, stocks);
     }
 
     private void WatchListGrid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
@@ -1023,12 +1002,9 @@ namespace Stocks4All
       dataGridViewPositions_Resize(null, null);
       pictureBoxBGImage.BringToFront();
 
-      market = new Stock("SPY");
-      TVIX = new Stock("TVIX");
-      nugt = new Stock("NUGT");
-      if (File.Exists(Robinhood.__stocksFile))
-        stocks = ReadFromXmlFile<ThreadedBindingList<Stock>>(Robinhood.__stocksFile);
-      else
+      //if (File.Exists(Robinhood.__stocksFile))
+      //  stocks = ReadFromXmlFile<ThreadedBindingList<Stock>>(Robinhood.__stocksFile);
+      //else
         stocks = new ThreadedBindingList<Stock>();
       AllPendingOrders = new ThreadedBindingList<OrderSnapshot>();
       RecentOrders = new ThreadedBindingList<OrderSnapshot>();
