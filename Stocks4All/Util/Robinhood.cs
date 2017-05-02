@@ -148,80 +148,77 @@ namespace Stocks4All.Util
       }
     }
 
-    public static List<Stock> GetQuote(List<Stock> stocks = null)
-    {
-      List<Stock> newList = new List<Stock>();
-      if (stocks.Count() > 0 && rh != null)
-      {
-        try
-        {
-          var quotes = rh.DownloadQuote(stocks.Select(s => s.Ticker)).Result;
+		public static List<Stock> GetQuote(List<Stock> stocks = null)
+		{
+			List<Stock> newList = new List<Stock>();
+			if (stocks.Count() > 0 && rh != null)
+			{
+				IList<Quote> quotes;
+				try
+				{
+					quotes = rh.DownloadQuote(stocks.Select(s => s.Ticker)).Result;
+				}
+				catch (Exception e)
+				{
+					quotes = null;
+				}
+				//if (stocks == null)
+				//  stocks = new List<Stock>();
+				if (quotes != null)
+				{
+					foreach (var q in quotes)
+					{
+						if (q is null)
+							continue;
+						Instrument instrument = rh.FindInstrument(q.Symbol).Result.FirstOrDefault(i => i.Symbol == q.Symbol);
 
-          //if (stocks == null)
-          //  stocks = new List<Stock>();
+						if (instrument is null)
+							continue;
+					
+						Stock stock = stocks.Find(s => s.Ticker == q.Symbol);
 
-          foreach (var q in quotes)
-          {
-            if (q == null)
-            {
-              continue;
-            }
-            Instrument instrument = rh.FindInstrument(q.Symbol).Result.First(i => i.Symbol == q.Symbol);
+						if (stock is null)
+						{
+							stock = new Stock();
+						}
 
-            Stock stock = stocks.Find(s => s.Ticker == q.Symbol);
+						stock.Ticker = q.Symbol;
+						//if (stock.Ticker != "AAPL" || stock.LastTradePrice < q.LastTradePrice)
+						stock.LastTradePrice = Math.Round(q.LastTradePrice, 2);
+						//if (stock.Ticker != "AAPL" )
 
-            if (stock != null)
-            {
 
-            }
-            else
-              stock = new Stock();
+						stock.ChangePctng = Math.Round(q.ChangePercentage, 2);
+						stock.AskPrice = Math.Round(q.AskPrice, 2);
+						stock.BidPrice = Math.Round(q.BidPrice, 2);
+						stock.InstrumentURL = instrument.InstrumentUrl.Uri.AbsoluteUri;
+						string chngSym = string.Empty;
 
-            stock.Ticker = q.Symbol;
-            //if (stock.Ticker != "AAPL" || stock.LastTradePrice < q.LastTradePrice)
-              stock.LastTradePrice = Math.Round(q.LastTradePrice, 2);
-            //if (stock.Ticker != "AAPL" )
-            
+						if (q.ChangePercentage < 0)
+						{
+							stock.Color = Color.IndianRed;
+							stock.ChngSym = "-";
+						}
+						else
+						{
+							stock.Color = Color.SeaGreen;
+							stock.ChngSym = "+";
+						}
 
-            stock.ChangePctng = Math.Round(q.ChangePercentage, 2);
-            stock.AskPrice = Math.Round(q.AskPrice, 2);
-            stock.BidPrice = Math.Round(q.BidPrice, 2);
-            stock.InstrumentURL = instrument.InstrumentUrl.Uri.AbsoluteUri;
-            string chngSym = string.Empty;
+						//return string.("{0}: ${1} ({2}{3}%)", stock.Ticker,
+						//    lastTradePrice.ToString(),
+						//    chngSym,
+						//    changePctng.ToString());
 
-            if (q.ChangePercentage < 0)
-            {
-              stock.Color = Color.IndianRed;
-              stock.ChngSym = "-";
-            }
-            else
-            {
-              stock.Color = Color.SeaGreen;
-              stock.ChngSym = "+";
-            }
+						newList.Add(stock);
+					}
+					//NotifyPropertyChanged();
 
-            //return string.("{0}: ${1} ({2}{3}%)", stock.Ticker,
-            //    lastTradePrice.ToString(),
-            //    chngSym,
-            //    changePctng.ToString());
-
-            newList.Add(stock);
-          }
-          //NotifyPropertyChanged();
-          return newList;
-        }
-        catch (Exception e)
-        {
-          return newList;
-          //NotifyPropertyChanged();
-        }
-      }
-      else
-      {
-        return newList;
-        // NotifyPropertyChanged();
-      }
-    }
+				}
+				
+			}
+			return newList;
+		}
 
     public static void CancelOrder()
     {
